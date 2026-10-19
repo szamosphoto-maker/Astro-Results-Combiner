@@ -1,0 +1,47 @@
+name: Build Astro Results Combiner for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'astro_results_combiner.py'
+      - 'Astro_Results_Combiner.ico'
+      - 'requirements.txt'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name Astro_Results_Combiner `
+            --icon Astro_Results_Combiner.ico `
+            --add-data "Astro_Results_Combiner.ico;." `
+            --collect-all astropy `
+            astro_results_combiner.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Astro_Results_Combiner_Windows
+          path: dist/Astro_Results_Combiner.exe
+          if-no-files-found: error
