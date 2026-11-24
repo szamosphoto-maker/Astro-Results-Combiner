@@ -21,10 +21,21 @@ KINDS = {
     'measurement': ('*_measurement.txt', 'measurement_results_osszesitett.vo'),
     'finder': ('*_WDS_Finder.csv', 'WDS_Finder_osszesitett.vo'),
     'rejection': ('*_rejection_diagnostic.txt', 'rejection_diagnostics_osszesitett.vo'),
+    'hist_analysis': ('*_analysis.csv', 'All_analysis_results.vo'),
+    'hist_measurements': ('*_measurements.csv', 'All_measurements.vo'),
+    'hist_dynamics': ('*_dynamics.csv', 'All_dynamics_results.vo'),
+    'stellar_data': ('Stellar_data.csv', 'All_stellar_data.vo'),
 }
 META_COLUMNS = {'Observation_Date', 'Observation_Folder', 'Source_Subfolder',
                 'Source_Folder', 'Source_File', 'UTC', 'Object', 'Quality', 'Analyzer', 'FITS_File', 'Rejection', 'Rejection_Type', 'Raw_Diagnostic', 'FITS'}
 FORCE_STRING = {'wds', 'wds_id', 'source_id', 'gaia_pri', 'gaia_sec', 'gaia_source_id'}
+NEW_KINDS = {'hist_analysis', 'hist_measurements', 'hist_dynamics', 'stellar_data'}
+STELLAR_TEXT = {'data_group', 'component', 'star_id', 'catalogue', 'table',
+                'catalogue_id', 'scope', 'match', 'observation_id', 'observation_date',
+                'source_field', 'cross_ids', 'parameter', 'value', 'unit', 'reference',
+                'quality', 'origin', 'status', 'detail', 'solution_id'}
+NEW_TEXT = {'precession_reference_equinox', 'component', 'identifier_a', 'identifier_b',
+            'precession_rows', 'quadrant_flips', 'precession_usno_lines'}
 OPTIONAL_BINARY = ['pmra_1', 'pmdec_1', 'pmra_2', 'pmdec_2']
 MEASUREMENT_FIELDS = {
     'Object': 'Object', 'WDS': 'WDS', 'Date': 'UTC', 'PA': 'PA_deg',
@@ -243,16 +254,21 @@ def finder_fits_name(csv_path: Path, companion_content: str | None):
     return csv_path.name[:-len('_WDS_Finder.csv')] + '.fit'
 
 
-def make_votable(df, path):
+def make_votable(df, path, kind=None):
     df = df.copy()
     for name in df.columns:
         lower = name.lower()
         if (name in META_COLUMNS or lower in FORCE_STRING or 'source_id' in lower
-                or lower.startswith('gaia') or lower.startswith('wds')):
+                or lower.startswith('gaia') or lower.startswith('wds')
+                or (kind in NEW_KINDS and lower in NEW_TEXT)
+                or (kind == 'stellar_data' and lower in STELLAR_TEXT)):
             df[name] = df[name].fillna('').astype(str)
             continue
         vals = df[name].fillna('').astype(str)
         nonempty = vals.str.strip().ne('')
+        if kind in NEW_KINDS and not nonempty.any():
+            df[name] = pd.Series(float('nan'), index=df.index, dtype=float)
+            continue
         if nonempty.any():
             converted = pd.to_numeric(vals.where(nonempty), errors='coerce')
             if converted[nonempty].notna().all():
@@ -268,8 +284,15 @@ def collect(root: Path, kinds: list[str], recursive: bool, use_dates: bool,
     totals = []
     for kind in kinds:
         pattern, outname = KINDS[kind]
-        paths = sorted(root.rglob(pattern) if recursive else root.glob(pattern))
+        if kind in NEW_KINDS:
+            from fnmatch import fnmatchcase
+            candidates = root.rglob('*') if recursive else root.iterdir()
+            paths = sorted(p for p in candidates if p.is_file() and fnmatchcase(p.name.lower(), pattern.lower()))
+        else:
+            paths = sorted(root.rglob(pattern) if recursive else root.glob(pattern))
         # A keresési minták nem illeszkednek a generált összesítő fájlokra.
+        if use_dates and kind in NEW_KINDS:
+            log(f'FIGYELEM [{kind}]: a dátumszűrés nem vonatkozik erre a fájltípusra.')
         audits = []
         parts = []
         for path in paths:
@@ -294,6 +317,13 @@ def collect(root: Path, kinds: list[str], recursive: bool, use_dates: bool,
                 else:
                     df, enc = read_csv(path)
                     effective_date = obs_date
+                    if kind == 'hist_measurements':
+                        # Historical CSVs do not contain a pair ID; recover it from the filename.
+                        match = re.fullmatch(r'wds(\d{5}[+-]\d{4})_(.+)_measurements\.csv', path.name, re.I)
+                        if match:
+                            for key, val in [('wds_id', match.group(1)), ('component', match.group(2))]:
+                                if key not in df.columns:
+                                    df[key] = val
                     if kind == 'binary':
                         for name in OPTIONAL_BINARY:
                             if name not in df.columns:
@@ -306,12 +336,12 @@ def collect(root: Path, kinds: list[str], recursive: bool, use_dates: bool,
                     row['Status'] = 'EMPTY'
                     audits.append(row)
                     continue
-                if use_dates and effective_date is None:
+                if use_dates and kind not in NEW_KINDS and effective_date is None:
                     row['Status'] = 'NO_DATE'
                     row['Error'] = 'Nem határozható meg a mérés dátuma'
                     audits.append(row)
                     continue
-                if use_dates and not (start <= effective_date <= end):
+                if use_dates and kind not in NEW_KINDS and not (start <= effective_date <= end):
                     row['Status'] = 'OUT_OF_RANGE'
                     row['Observation_Date'] = effective_date.isoformat()
                     audits.append(row)
@@ -360,7 +390,7 @@ def collect(root: Path, kinds: list[str], recursive: bool, use_dates: bool,
             else:
                 output_name = outname
             result_file = outdir / output_name
-            make_votable(merged, result_file)
+            make_votable(merged, result_file, kind)
             totals.append(f'{kind}: {len(parts)} fájl, {len(merged)} sor → {output_name}')
         else:
             totals.append(f'{kind}: nincs feldolgozható fájl')
@@ -378,8 +408,8 @@ class Application(tk.Tk):
             self.iconbitmap(str(icon_dir / 'Astro_Results_Combiner.ico'))
         except (tk.TclError, OSError):
             pass
-        self.geometry('760x710')
-        self.minsize(640, 560)
+        self.geometry('800x850')
+        self.minsize(700, 760)
         self.q = queue.Queue()
         self.folder = tk.StringVar()
         self.kinds = {k: tk.BooleanVar(value=k in ('binary', 'measurement')) for k in KINDS}
@@ -395,7 +425,7 @@ class Application(tk.Tk):
         main = ttk.Frame(self, padding=16)
         main.pack(fill='both', expand=True)
         ttk.Label(main, text='Astro Results Combiner', font=('Segoe UI', 16, 'bold')).pack(anchor='w')
-        ttk.Label(main, text='iTelescope és Seestar mérések egyesítése VOTable formátumba').pack(anchor='w', pady=(0, 15))
+        ttk.Label(main, text='iTelescope, Seestar, HisTool és csillagadatok egyesítése VOTable formátumba').pack(anchor='w', pady=(0, 15))
         folder_frame = ttk.LabelFrame(main, text='Főkönyvtár', padding=10)
         folder_frame.pack(fill='x', pady=5)
         ttk.Entry(folder_frame, textvariable=self.folder).pack(side='left', fill='x', expand=True)
@@ -405,11 +435,13 @@ class Application(tk.Tk):
         for kind, (pattern, _) in KINDS.items():
             label = ('DuoStar Finder (*_WDS_Finder.csv)' if kind == 'finder' else
                      'Elutasított mérések (*_rejection_diagnostic.txt)' if kind == 'rejection' else pattern)
+            if kind in NEW_KINDS and kind != 'stellar_data':
+                label = 'HisTool: ' + pattern
             ttk.Checkbutton(frame, text=label, variable=self.kinds[kind]).pack(anchor='w')
         frame = ttk.LabelFrame(main, text='Keresési feltételek', padding=10)
         frame.pack(fill='x', pady=5)
         ttk.Checkbutton(frame, text='Almappák átvizsgálása', variable=self.recursive).grid(row=0, column=0, sticky='w', columnspan=3)
-        ttk.Checkbutton(frame, text='Dátumszűrés', variable=self.use_dates).grid(row=1, column=0, sticky='w', columnspan=3)
+        ttk.Checkbutton(frame, text='Dátumszűrés (csak az eredeti 5 fájltípusra)', variable=self.use_dates).grid(row=1, column=0, sticky='w', columnspan=3)
         ttk.Label(frame, text='Kezdő dátum (ÉÉÉÉ-HH-NN):').grid(row=2, column=0, sticky='w', pady=4)
         ttk.Entry(frame, textvariable=self.fromdate, width=14).grid(row=2, column=1, sticky='w', padx=8)
         ttk.Label(frame, text='Záró dátum:').grid(row=3, column=0, sticky='w', pady=4)
